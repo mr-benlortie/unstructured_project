@@ -1,0 +1,327 @@
+---
+title: "Sentiment Analysis of Comments on RateMyProfessors.com"
+author: "Ben Lortie"
+date: "2024-02-23"
+format:
+  html:
+    theme: united
+    highlight-style: tango
+    toc: true
+    toc-location: left
+    self-contained: true
+---
+
+```{r Packages, include = FALSE}
+library(rvest)
+library(magrittr)
+library(stringr)
+library(sentimentr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidytext)
+library(tm)
+library(quanteda)
+library(stm)
+library(wordcloud2)
+```
+
+For my project, I wanted to take a look at comments left by students on some of past professor's pages on ratemyprofessors.com. Since I am aiming to pursue my PhD, I decided to use sentiment analysis to see what students value when rating their professors. The goal is that I can use this information to start considering my teaching style and how I want to be perceived when I start teaching.
+
+## Web Scraping
+```{r First Scrape}
+name <- c("Wan Ting Chiu", "Robert Holland", "Chad Allred", "Andrew Freed", "Olga Senicheva")
+
+id <- c("2560231", "799230", "2369546", "1887440", "2384348")
+
+prof_table <- data.frame(name, id, dept = NA, avg_rating = NA, total_ratings = NA)
+
+for (i in 1:nrow(prof_table)) {
+  prof_id <- prof_table$id[i]
+  prof_url <- glue::glue("https://www.ratemyprofessors.com/professor/{prof_id}")
+  
+  dept <- read_html(url(prof_url)) %>% 
+    html_element(".TeacherDepartment__StyledDepartmentLink-fl79e8-0") %>% 
+    html_text() %>% 
+    gsub("\\sdepartment", "", .)
+  
+  avg_rating <- read_html(url(prof_url)) %>% 
+    html_element(".RatingValue__Numerator-qw8sqy-2") %>% 
+    html_text()
+  
+  total_ratings <- read_html(url(prof_url)) %>% 
+    html_element("a[href='#ratingsList']") %>% 
+    html_text() %>% 
+    str_extract("\\d+")
+  
+  prof_table[i, c("dept", "avg_rating", "total_ratings")] <- c(dept, avg_rating, total_ratings)
+}
+
+prof_table
+```
+
+First, I needed a diverse selection of my previous professors at Purdue University. I found a good handful of professors that had varying average ratings. By getting a selection of professors with a wide range average ratings, I was able to capture the positive sentiments (i.e., what I should be looking to do as a professor) as well as the negative sentiments (i.e., what I should avoid as a professor).
+
+After compiling my list of names, I found each professor's rating page and saw that every URL had the same base: "https://www.ratemyprofessors.com/professor/". Immediately following the final slash is an ID that redirects to a specific professor - this was my key to finding some preliminary information on each professor. Using these IDs, I was able to inspect the HTML elements and extract each professor's department, average rating, and total number of ratings. After getting this information, I had a better idea of how many comments I needed to get from the webpages. This number was <b>`r sum(as.numeric(prof_table$total_ratings))`</b> - I could consider the next part of scraping a success if I hit this number.
+
+```{python Second Scrape}
+# import pandas as pd
+# import requests
+# from bs4 import BeautifulSoup
+# from playwright.sync_api import sync_playwright, Playwright
+# import re
+# 
+# entries = []
+# 
+# prof_ids = ["2560231", "799230", "2369546", "1887440", "2384348"]
+# 
+# for i in prof_ids:
+#   chrome = pw.chromium.launch(headless = False)
+#   page = chrome.new_page()
+#   
+#   page.goto(f"https://www.ratemyprofessors.com/professor/{i}", timeout = 120000)
+#   close_banner_button = page.locator('img[alt="Banner Close Icon"]')
+#   
+#   if close_banner_button.is_visible():
+#     close_banner_button.click()
+#     
+#   total_ratings_element = page.locator('a[href="#ratingsList"]').inner_text(timeout = 120000)
+#   total_ratings = int(re.search(r'\b(\d+)\b', total_ratings_element).group(1))
+#   
+#   if total_ratings > 20:
+#     while True:
+#       load_more_button = page.get_by_text('Load More Ratings')
+#       if load_more_button.is_visible() and load_more_button.is_enabled():
+#         load_more_button.click(timeout = 120000)
+#       else:
+#         break
+#   for j in range(total_ratings):
+#     indv_comment = page.locator(".Comments__StyledComments-dzzyvm-0").nth(j).inner_text(timeout = 120000)
+#     indv_quality = page.locator('.CardNumRating__CardNumRatingNumber-sc-17t4b9u-2').nth(j * 2).inner_text(timeout = 120000)
+#     indv_difficulty = page.locator('.CardNumRating__CardNumRatingNumber-sc-17t4b9u-2').nth(j * 2 + 1).inner_text(timeout = 120000)
+#   
+#   entries.append({"id": prof_ids, "quality": indv_quality, "difficulty": indv_difficulty, "comment": indv_comment})
+# 
+#   chrome.close()
+# 
+# pw.stop()
+# 
+# comments_df.to_csv('C:/Users/blort/OneDrive/Desktop/MSBR70310/Project/comments.csv', index = False)
+```
+
+This project would have been a lot less rewarding if there weren't any hiccups along the way. Due to how the ratemyprofessors page is set up, simply using the rvest package was not an option - I needed something with more capabilities. I tried using the RSelenium package, but after lots of difficulty trying to connect to a selenium browser, the switch to Python was ultimately made. Luckily, learning how to use beautifulsoup and playwright was more straightforward than I thought, and I was able to get over the initial hump of learning these packages. It took a lot of trial and error, especially learning how to get around cookie pop-ups, ads, load more buttons, and timeouts. Nevertheless, I was able to retrieve all `r sum(as.numeric(prof_table$total_ratings))` comments and convert the list to a .csv file to be used in the setup of my sentiment analysis.
+
+```{r Merge}
+comments <- read.csv("C:/Users/blort/OneDrive/Desktop/MSBR70310/Project/comments.csv")
+
+table <- merge(prof_table[, 1:2], comments, by = "id")
+
+head(table)
+
+agg_table <- aggregate(cbind(quality, difficulty) ~ name, table, mean) %>% 
+  pivot_longer(cols = c(quality, difficulty), names_to = "variable", values_to = "value")
+
+agg_table
+
+ggplot(agg_table, aes(name, value, fill = variable))+
+  geom_col(position = position_dodge(width = 0.6), width = 0.5)+
+  theme_light()+
+  theme(panel.grid = element_blank(),
+        panel.border = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        axis.ticks = element_blank())+
+  labs(x = "Professor Name", y = "Quality & Difficulty", title = "Comparative Bar Charts", subtitle = "Professor Quality & Course Difficulty", fill = "Rating")+
+  scale_fill_manual(values = c("difficulty" = "#000000", "quality" = "#cfb991"), labels = c("difficulty" = "Difficulty", "quality" = "Quality"))
+  
+```
+
+After plotting average quality and difficulty ratings from the site, there is a quite obvious spread in both metrics. The selection of professors I chose range from low to high ratings in both quality and course difficulty, and I think this is the best for comparing comments in the next steps. Going into the sentiment analysis, my guess is that professors with higher quality ratings will have a higher sentiment. To frame it in terms of difficulty, I predict that professors with lower difficulty will receive a higher sentiment too. Professors with lower quality and higher difficulty are going to receive lower sentiments.
+
+## Sentiment Analysis pt. 1
+```{r First Sentiment Analysis}
+sent_score_table <- data.frame(name = character(0), element_id = numeric(0), sentence_id = numeric(0), word_count = numeric(0), sentiment = numeric(0), comment = character(0), Rating = numeric(0))
+
+element_id_counter <- 1
+
+for (i in 1:nrow(table)){
+  statement <- table$comment[i]
+  
+  sent_score <- sentiment(tolower(statement), 
+                          polarity_dt = lexicon::hash_sentiment_jockers_rinker)
+  
+  row_data <- data.frame(name = table$name[i], 
+                         element_id = element_id_counter, 
+                         sentence_id = sent_score$sentence_id, 
+                         word_count = sent_score$word_count, 
+                         sentiment = sent_score$sentiment,
+                         comment = statement,
+                         Rating = table$quality[i])
+  
+  sent_score_table <- bind_rows(sent_score_table, row_data)
+  
+  element_id_counter <- element_id_counter + 1
+}
+
+sent_score_table$sentiment <- round(sent_score_table$sentiment, 5)
+
+sent_agg <- aggregate(sentiment ~ name, sent_score_table, mean)
+
+sent_table <- merge(prof_table, sent_agg, by = "name")
+
+sent_table$rank <- rank(-sent_table$sentiment)
+
+sent_table
+```
+
+Ranking the professors based on sentiment scores validated my previous assumptions. Moving onto the topic modeling, I want to take this information and compare topics of the highest and lowest professors. Luckily, the two professors I had with over 100 entries on the site were on opposite ends of the ranking.
+
+## Topic Modeling
+```{r Topic Modeling Setup}
+freed <- table[table$name == "Andrew Freed", ]
+holland <- table[table$name == "Robert Holland", ]
+```
+
+```{r Freed Topic Modeling}
+Encoding(freed$comment) <- "UTF-8"
+
+freed$clean <- freed$comment %>% 
+  textclean::replace_contraction() %>% 
+  str_replace_all(., "\n", " ") %>% 
+  str_replace_all(., "(\\[.*?\\])", "") %>% 
+  str_squish() %>% 
+  gsub("([a-z])([A-Z])", "\\1 \\2", .) %>% 
+  tolower() %>% 
+  textstem::lemmatize_strings(.) %>% 
+  removeWords(stopwords("SMART"))
+
+freed_comment_corpus <- corpus(freed, text_field = "clean")
+
+freed_comment_token <- tokens(freed_comment_corpus, 
+                      remove_punct = TRUE, 
+                      remove_symbols = TRUE,
+                      remove_numbers = TRUE)
+
+freed_comment_dfm <- dfm(freed_comment_token)
+
+freed_comment_stm <- convert(freed_comment_dfm, to = "stm")
+
+freed_docs_stm <- freed_comment_stm$documents 
+freed_vocab_stm <- freed_comment_stm$vocab    
+freed_meta_stm <- freed_comment_stm$meta
+freed_meta_stm$text <- freed$comment
+
+freed_commentPrep <- prepDocuments(documents = freed_docs_stm, 
+                           vocab = freed_vocab_stm,
+                           meta = freed_meta_stm)
+
+freed_topics5 <- stm(documents = freed_commentPrep$documents, 
+             vocab = freed_commentPrep$vocab, seed = 1001,
+             K = 5, verbose = FALSE)
+
+plot(freed_topics5)
+
+labelTopics(freed_topics5)
+```
+
+```{r Holland Topic Modeling}
+Encoding(holland$comment) <- "UTF-8"
+
+holland$clean <- holland$comment %>% 
+  textclean::replace_contraction() %>% 
+  str_replace_all(., "\n", " ") %>% 
+  str_replace_all(., "(\\[.*?\\])", "") %>% 
+  str_squish() %>% 
+  gsub("([a-z])([A-Z])", "\\1 \\2", .) %>% 
+  tolower() %>% 
+  textstem::lemmatize_strings(.) %>% 
+  removeWords(stopwords("SMART"))
+
+holland_comment_corpus <- corpus(holland, text_field = "clean")
+
+holland_comment_token <- tokens(holland_comment_corpus, 
+                      remove_punct = TRUE, 
+                      remove_symbols = TRUE,
+                      remove_numbers = TRUE)
+
+holland_comment_dfm <- dfm(holland_comment_token)
+
+holland_comment_stm <- convert(holland_comment_dfm, to = "stm")
+
+holland_docs_stm <- holland_comment_stm$documents
+holland_vocab_stm <- holland_comment_stm$vocab
+# holland_meta_stm <- holland_comment_stm$meta
+# holland_meta_stm$text <- holland$comment
+
+holland_meta_stm <- data.frame(text = holland$comment)
+
+holland_commentPrep <- prepDocuments(documents = holland_docs_stm, 
+                           vocab = holland_vocab_stm,
+                           meta = holland_meta_stm)
+
+holland_topics5 <- stm(documents = holland_commentPrep$documents, 
+             vocab = holland_commentPrep$vocab, seed = 1001,
+             K = 5, verbose = FALSE)
+
+plot(holland_topics5)
+
+labelTopics(holland_topics5)
+```
+
+After splitting the comments by professor name and running a sentiment analysis on each subset, I was able to get the overall topics for each professor. Taking these topics, I want to takes these words and run a separate word-based sentiment analysis.
+
+## Sentiment Analysis pt. 2
+```{r Second Sentiment Analysis Setup}
+freed_vector <- as.vector(freed_topics5)
+
+holland_vector <- as.vector(holland_topics5)
+
+freed_unique <- setdiff(freed_vector$vocab, holland_vector$vocab)
+
+holland_unique <- setdiff(holland_vector$vocab, freed_vector$vocab)
+
+freed_df <- data.frame(Name = "freed", Word = freed_unique)
+holland_df <- data.frame(Name = "holland", Word = holland_unique)
+
+freed_holland <- rbind(freed_df, holland_df)
+```
+
+```{r Second Sentiment Analysis}
+final_result <- data.frame(sentiment = numeric(0), positive = numeric(0), negative = numeric(0))
+
+for (i in 1:nrow(freed_holland)){
+  statement <- freed_holland$Word[i]
+    
+  tokens <- tibble(text = statement) %>% 
+    unnest_tokens(output = word, input = text)
+  
+  sentiment_counts <- tokens %>%
+    left_join(get_sentiments("bing"), by = "word") %>%
+    count(sentiment) %>% 
+    spread(sentiment, n, fill = 0)
+  
+  result <- sentiment_counts %>%
+    mutate(sentiment = if ("positive" %in% colnames(sentiment_counts) && "negative" %in% colnames(sentiment_counts)) {
+      positive - negative
+    } else if ("positive" %in% colnames(sentiment_counts)) {
+      positive
+    } else if ("negative" %in% colnames(sentiment_counts)) {
+      0 - negative
+    } else {
+      0
+    })
+  
+  final_result <- bind_rows(final_result, result)
+}
+
+freed_holland <- cbind(freed_holland, final_result)
+
+freed_holland2 <- freed_holland[freed_holland$sentiment != 0, ]
+
+aggregate(sentiment ~ Name, freed_holland2, mean)
+
+as.vector(freed_holland2[freed_holland2$Name == "freed", 2])
+as.vector(freed_holland2[freed_holland2$Name == "holland", 2])
+```
+
+I was interested in the unique words that appeared in both subsets. After finding the unique words, running the word-based sentiment analysis, and removing neutral (0 sentiment) words, I found that Prof. Freed's unique words had an average sentiment of `r round(aggregate(sentiment ~ Name, freed_holland2, mean)[1, 2], 4)` while Prof. Holland had an average sentiment `r round(aggregate(sentiment ~ Name, freed_holland2, mean)[2, 2], 4)`.
